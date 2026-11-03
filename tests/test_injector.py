@@ -3,6 +3,7 @@
 import pytest
 import torch
 import torch.nn as nn
+from transformers import GPT2Config, GPT2LMHeadModel, Qwen2Config, Qwen2ForCausalLM
 
 from src.core.injector import (
     count_parameters,
@@ -11,7 +12,7 @@ from src.core.injector import (
     merge_adapters,
     unmerge_adapters,
 )
-from src.core.lora_layer import LoRAConfig, LoRALinear
+from src.core.lora_layer import LoRAConfig, LoRAConv1D, LoRALinear
 
 
 class ToyAttention(nn.Module):
@@ -111,8 +112,6 @@ def test_model_end_to_end_backward():
     config = LoRAConfig(r=4, lora_alpha=8.0, target_modules=["q_proj", "v_proj"])
     model = inject_lora(model, config)
 
-    # Note: When B = 0 at step 0, dL/dA is 0 by chain rule (Hu et al., 2022).
-    # Initialize B with small weights to verify backward gradient flow through both A and B.
     for m in model.modules():
         if isinstance(m, LoRALinear):
             torch.nn.init.normal_(m.lora_B.weight, std=0.01)
@@ -122,7 +121,6 @@ def test_model_end_to_end_backward():
     loss = out.sum()
     loss.backward()
 
-    # LoRA adapters must have non-zero gradients for both A and B
     for name, param in model.named_parameters():
         if "lora_" in name:
             assert param.grad is not None
@@ -138,7 +136,6 @@ def test_model_global_merge_unmerge():
     config = LoRAConfig(r=4, lora_alpha=8.0, target_modules=["q_proj", "v_proj"])
     model = inject_lora(model, config)
 
-    # Initialize non-zero adapter weights
     for m in model.modules():
         if isinstance(m, LoRALinear):
             torch.nn.init.normal_(m.lora_A.weight, std=0.05)
@@ -147,12 +144,70 @@ def test_model_global_merge_unmerge():
     x = torch.randn(2, 5, 32)
     out_before = model(x)
 
-    # Global merge
     merge_adapters(model)
     out_merged = model(x)
     assert torch.allclose(out_before, out_merged, atol=1e-6)
 
-    # Global unmerge
     unmerge_adapters(model)
     out_unmerged = model(x)
     assert torch.allclose(out_before, out_unmerged, atol=1e-6)
+
+
+def test_real_gpt2_injection():
+    """Verify LoRA injection into real Hugging Face GPT-2 architecture."""
+    cfg = GPT2Config(n_layer=2, n_head=2, n_embd=64, vocab_size=500, bos_token_id=0, eos_token_id=1)
+    model = GPT2LMHeadModel(cfg)
+
+    lora_cfg = LoRAConfig(r=4, lora_alpha=8.0, target_modules=["c_attn"])
+    model = inject_lora(model, lora_cfg)
+
+    # Check c_attn replaced by LoRAConv1D
+    for block in model.transformer.h:
+        assert isinstance(block.attn.c_attn, LoRAConv1D)
+
+    stats = count_parameters(model)
+    assert stats["percent_trainable"] < 3.0  # < 3% for tiny 2-layer toy model (< 1% for full 124M model)
+    assert stats["trainable"] < 3000
+
+    x = torch.randint(0, 500, (2, 8))
+    out = model(x)
+    assert out.logits.shape == (2, 8, 500)
+
+    out.logits.sum().backward()
+    for name, param in model.named_parameters():
+        if "lora_B" in name:
+            assert param.grad is not None
+
+
+def test_real_qwen2_injection():
+    """Verify LoRA injection into real Hugging Face Qwen2.5 architecture."""
+    cfg = Qwen2Config(
+        vocab_size=500,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+    )
+    model = Qwen2ForCausalLM(cfg)
+
+    lora_cfg = LoRAConfig(r=4, lora_alpha=8.0, target_modules=["q_proj", "v_proj"])
+    model = inject_lora(model, lora_cfg)
+
+    for layer in model.model.layers:
+        assert isinstance(layer.self_attn.q_proj, LoRALinear)
+        assert isinstance(layer.self_attn.v_proj, LoRALinear)
+        assert isinstance(layer.self_attn.k_proj, nn.Linear)
+
+    stats = count_parameters(model)
+    assert stats["percent_trainable"] < 3.0  # < 3% for tiny 2-layer toy model (< 1% for full 124M model)
+    assert stats["trainable"] < 3000
+
+    x = torch.randint(0, 500, (2, 8))
+    out = model(x)
+    assert out.logits.shape == (2, 8, 500)
+
+    out.logits.sum().backward()
+    for name, param in model.named_parameters():
+        if "lora_B" in name:
+            assert param.grad is not None

@@ -9,6 +9,7 @@ from .injector import (
     unmerge_adapters,
 )
 from .lora_layer import LoRAConfig, LoRAConv1D, LoRALayer, LoRALinear
+from .lora_plus import get_lora_plus_param_groups
 
 __all__ = [
     "LoRAConfig",
@@ -16,6 +17,7 @@ __all__ = [
     "LoRALinear",
     "LoRAConv1D",
     "DoRALinear",
+    "get_lora_plus_param_groups",
     "inject_lora",
     "mark_only_lora_as_trainable",
     "merge_adapters",
