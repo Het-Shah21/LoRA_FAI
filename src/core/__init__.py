@@ -10,6 +10,7 @@ from .injector import (
 )
 from .lora_layer import LoRAConfig, LoRAConv1D, LoRALayer, LoRALinear
 from .lora_plus import get_lora_plus_param_groups
+from .qlora_layer import QLoRALinear, build_nf4_config, load_nf4_config
 
 __all__ = [
     "LoRAConfig",
@@ -23,4 +24,7 @@ __all__ = [
     "merge_adapters",
     "unmerge_adapters",
     "count_parameters",
+    "QLoRALinear",
+    "build_nf4_config",
+    "load_nf4_config",
 ]
